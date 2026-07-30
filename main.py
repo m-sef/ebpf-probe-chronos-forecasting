@@ -6,7 +6,7 @@ from pathlib import Path
 import argparse
 
 import pandas
-#from chronos import Chronos2Pipeline
+from chronos import Chronos2Pipeline
 
 EBPF_PROBE_DIR   = "/sys/fs/bpf/ebpf_probe/"
 FORECAST_LOG_DIR = "/tmp/ebpf-probe-chronos-forecasting/"
@@ -14,6 +14,7 @@ FORECAST_LOG_DIR = "/tmp/ebpf-probe-chronos-forecasting/"
 SUMMARY_COLUMNS = ['core', 'event', 'value', 'enabled_ns', 'running_ns']
 
 DEFAULT_CONTEXT_LENGTH    = 30
+DEFAULT_PREDICTION_LENGTH = 10
 DEFAULT_SAMPLE_INTERVAL   = 10
 DEFAULT_FORECAST_INTERVAL = 10
 
@@ -59,14 +60,18 @@ def sample_callback(
         context_length     : int) -> None:
 
     previous_data_frame = initial_data_frame
+    start_timestamp     = pandas.Timestamp.now()
+    sample_index        = 0
 
     while not stop_signal.is_set():
         sample_data_frame = sample()
         diffed_data_frame = sample_data_frame - previous_data_frame.values
         previous_data_frame = sample_data_frame
 
-        diffed_data_frame.insert(0, 'timestamp_s', diffed_data_frame.index)
-        diffed_data_frame['item_id'] = 'eBPF Probe Data'
+        sample_index += 1
+
+        diffed_data_frame.insert(0, 'timestamp_s', start_timestamp + pandas.Timedelta(seconds=sample_interval * sample_index))
+        diffed_data_frame['item_id'] = 'ebpf'
 
         with mutex_lock:
             combined_data_frame = pandas.concat([context_data_frame, diffed_data_frame]).tail(context_length)
@@ -75,19 +80,35 @@ def sample_callback(
             for column in combined_data_frame.columns:
                 context_data_frame[column] = combined_data_frame[column]
 
-        print(context_data_frame)
+        #print(context_data_frame)
 
         time.sleep(sample_interval)
 
 def forecast_callback(
         stop_signal        : threading.Event,
-        forecast_interval  : float,
+        mutex_lock         : threading.Lock,
+        pipeline           : Chronos2Pipeline,
         context_data_frame : pandas.DataFrame,
-        mutex_lock         :  threading.Lock) -> None:
+        forecast_interval  : float,
+        context_length     : int,
+        prediction_length  : int) -> None:
     
     while not stop_signal.is_set():
-        with mutex_lock:
-            pass
+        if len(context_data_frame) == context_length:
+            print("ENOUGH DATA TO MAKE PREDICTION")
+
+            with mutex_lock:
+                forecast_data_frame = pipeline.predict_df(
+                    context_data_frame,
+                    id_column="item_id",
+                    timestamp_column="timestamp_s",
+                    target="cache-misses",
+                    prediction_length=prediction_length,
+                )
+
+                print(forecast_data_frame)
+        else:
+            print("NOT ENOUGH DATA TO MAKE PREDICTION")
 
         time.sleep(forecast_interval)
 
@@ -95,6 +116,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "-c", "--context-length", type=int, default=DEFAULT_CONTEXT_LENGTH)
+    parser.add_argument(
+        "-p", "--prediction-length", type=int, default=DEFAULT_PREDICTION_LENGTH)
     parser.add_argument(
         "-i", "--sample-interval", type=float, default=DEFAULT_SAMPLE_INTERVAL)
     parser.add_argument(
@@ -104,23 +127,29 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    context_data_frame = pandas.DataFrame(
-        columns=['timestamp_s'], )
+    pipeline : Chronos2Pipeline = Chronos2Pipeline.from_pretrained("amazon/chronos-2")
 
     stop_signal = threading.Event()
     mutex_lock  = threading.Lock()
 
+    context_data_frame = pandas.DataFrame()
     initial_data_frame = sample()
 
     sample_thread = threading.Thread(
         target=sample_callback,
-        args=(stop_signal, mutex_lock, context_data_frame, initial_data_frame, args.sample_interval, args.context_length),
+        args=(
+            stop_signal, mutex_lock,
+            context_data_frame, initial_data_frame,
+            args.sample_interval, args.context_length),
         daemon=True)
     sample_thread.start()
 
     forecast_thread = threading.Thread(
         target=forecast_callback,
-        args=(stop_signal, args.forecast_interval, context_data_frame, mutex_lock),
+        args=(
+            stop_signal, mutex_lock,
+            pipeline, context_data_frame,
+            args.forecast_interval, args.context_length, args.prediction_length),
         daemon=True)
     forecast_thread.start()
 
