@@ -13,10 +13,10 @@ FORECAST_LOG_DIR = "/tmp/ebpf-probe-chronos-forecasting/"
 
 SUMMARY_COLUMNS = ['core', 'event', 'value', 'enabled_ns', 'running_ns']
 
-DEFAULT_CONTEXT_LENGTH    = 30
-DEFAULT_PREDICTION_LENGTH = 10
-DEFAULT_SAMPLE_INTERVAL   = 10
-DEFAULT_FORECAST_INTERVAL = 10
+DEFAULT_CONTEXT_LENGTH      = 30
+DEFAULT_PREDICTION_LENGTH   = 10
+DEFAULT_SAMPLE_INTERVAL     = 10
+DEFAULT_PREDICTION_INTERVAL = 10
 
 def sample() -> pandas.DataFrame:
     # ead each iterator file and coalesce into a single sample DataFrame
@@ -84,44 +84,62 @@ def sample_callback(
 
         time.sleep(sample_interval)
 
-def forecast_callback(
-        stop_signal        : threading.Event,
-        mutex_lock         : threading.Lock,
-        pipeline           : Chronos2Pipeline,
-        context_data_frame : pandas.DataFrame,
-        forecast_interval  : float,
-        context_length     : int,
-        prediction_length  : int) -> None:
+def prediction_callback(
+        stop_signal         : threading.Event,
+        mutex_lock          : threading.Lock,
+        pipeline            : Chronos2Pipeline,
+        context_data_frame  : pandas.DataFrame,
+        prediction_interval : float,
+        context_length      : int,
+        prediction_length   : int,
+        context_path        : str | None,
+        prediction_path     : str | None) -> None:
     
     while not stop_signal.is_set():
         if len(context_data_frame) == context_length:
             print("ENOUGH DATA TO MAKE PREDICTION")
 
             with mutex_lock:
-                forecast_data_frame = pipeline.predict_df(
+                prediction_data_frame = pipeline.predict_df(
                     context_data_frame,
                     id_column="item_id",
                     timestamp_column="timestamp_s",
-                    target="cache-misses",
+                    target="rx_bytes",
                     prediction_length=prediction_length,
                 )
 
-                print(forecast_data_frame)
+                if (context_path):
+                    context_data_frame.to_csv(context_path, mode='a', header=False, index=False)
+
+                if (prediction_path):
+                    prediction_data_frame.to_csv(prediction_path, mode='a', header=False, index=False)
         else:
             print("NOT ENOUGH DATA TO MAKE PREDICTION")
 
-        time.sleep(forecast_interval)
+        time.sleep(prediction_interval)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "-c", "--context-length", type=int, default=DEFAULT_CONTEXT_LENGTH)
+        "-s", "--sample-interval", type=float, default=DEFAULT_SAMPLE_INTERVAL,
+        help="Time (in seconds) between each sample")
     parser.add_argument(
-        "-p", "--prediction-length", type=int, default=DEFAULT_PREDICTION_LENGTH)
+        "-c", "--context-length", type=int, default=DEFAULT_CONTEXT_LENGTH,
+        help="Length of context window (samples)")
     parser.add_argument(
-        "-i", "--sample-interval", type=float, default=DEFAULT_SAMPLE_INTERVAL)
+        "--context-path", type=str,
+        help="File path to write context data to")
+
     parser.add_argument(
-        "-f", "--forecast-interval", type=float, default=DEFAULT_FORECAST_INTERVAL)
+        "-f", "--prediction-interval", type=float, default=DEFAULT_PREDICTION_INTERVAL,
+         help="Time (in seconds) between each prediction")
+    parser.add_argument(
+        "-p", "--prediction-length", type=int, default=DEFAULT_PREDICTION_LENGTH,
+        help="Length of prediction DataFrame (samples)")
+    parser.add_argument(
+        "--prediction-path", type=str,
+        help="File path to write prediction data to")
+    
     return parser.parse_args()
 
 def main() -> None:
@@ -144,14 +162,15 @@ def main() -> None:
         daemon=True)
     sample_thread.start()
 
-    forecast_thread = threading.Thread(
-        target=forecast_callback,
+    prediction_thread = threading.Thread(
+        target=prediction_callback,
         args=(
             stop_signal, mutex_lock,
             pipeline, context_data_frame,
-            args.forecast_interval, args.context_length, args.prediction_length),
+            args.prediction_interval, args.context_length, args.prediction_length,
+            args.context_path, args.prediction_path),
         daemon=True)
-    forecast_thread.start()
+    prediction_thread.start()
 
     try:
         while True:
