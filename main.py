@@ -2,13 +2,16 @@
 import threading
 import signal
 import time
+import io
+from collections import deque
 from pathlib import Path
 import argparse
 
 import pandas
 from chronos import Chronos2Pipeline
 
-EBPF_PROBE_DIR   = "/sys/fs/bpf/ebpf_probe/"
+EBPF_LOG_DIR     = "/local/ebpf-probe-shepherd-muster/shep_remote_muster/mustherd-logs-muster-10.10.1.1/"
+VEGETA_LOG_DIR   = "/tmp/"
 FORECAST_LOG_DIR = "/tmp/ebpf-probe-chronos-forecasting/"
 
 SUMMARY_COLUMNS = ['core', 'event', 'value', 'enabled_ns', 'running_ns']
@@ -18,18 +21,50 @@ DEFAULT_PREDICTION_LENGTH   = 10
 DEFAULT_SAMPLE_INTERVAL     = 10
 DEFAULT_PREDICTION_INTERVAL = 10
 
+EBPF_EVENT_IDS = {
+    0 : "rx_packets", 
+    1 : "rx_bytes",
+    2 : "tx_packets",
+    3 : "tx_bytes",
+    4 : "instructions",
+    5 : "cpu-cycles",
+    6 : "ref-cpu-cycles",
+    7 : "cache-misses"
+}
+
+def read_and_parse_ebpf_logs() -> pandas.DataFrame:
+    pass
+
+def read_and_parse_vegeta_logs() -> pandas.DataFrame:
+    columns : list[str] = ['timestamp_ns', 'status', 'latency_ns']
+    log_files = sorted(
+        glob.glob(f"{VEGETA_LOG_DIR}*vegeta*.log"),
+        key=lambda name: int(re.search(r"vegeta(\d+)\.log$", name).group(1)),
+    )
+    data_frames : list[pandas.DataFrame] = [
+        pandas.read_csv(log_file, usecols=[0, 1, 2], header=None, names=columns)
+        for log_file in log_files
+    ]
+    combined_data_frame : pandas.DataFrame = pandas.concat(data_frames, ignore_index=True)
+
+    combined_data_frame['timestamp_ns'] = pandas.to_datetime(combined_data_frame['timestamp_ns'], unit='ns')
+    combined_data_frame = combined_data_frame.set_index('timestamp_ns').sort_index()
+
+    #return combined_data_frame['latency_ns'].resample('1s').quantile(0.99).expanding().mean() / 1e6
+    return combined_data_frame['latency_ns'].resample('100ms').quantile(0.99) / 1e6
+
 def sample() -> pandas.DataFrame:
     # ead each iterator file and coalesce into a single sample DataFrame
     summary_data_frames : list[pandas.DataFrame] = []
     
-    for subpath in Path(EBPF_PROBE_DIR).iterdir():
-        if "rapl" in subpath.name:
-            continue
-    
-        summary_path = subpath / "summary"
-        if (summary_path.exists()):
-            summary_data_frame = pandas.read_csv(summary_path, header=None, names=SUMMARY_COLUMNS, na_values="N/A")
-            summary_data_frames.append(summary_data_frame)
+    for subpath in Path(EBPF_LOG_DIR).glob("ebpf-log-core-*"):
+        with open(subpath) as file:
+            last_lines = deque(file, maxlen=len(EBPF_EVENT_IDS))
+        summary_data_frame = pandas.read_csv(
+            io.StringIO(''.join(last_lines)),
+            header=None, names=SUMMARY_COLUMNS, na_values="N/A", sep=r'\s+')
+        summary_data_frame['event'] = summary_data_frame['event'].map(EBPF_EVENT_IDS)
+        summary_data_frames.append(summary_data_frame)
     
     sample_data_frame = pandas.concat(summary_data_frames)
     sample_data_frame.insert(0, "timestamp_s", int(time.time()))
@@ -44,7 +79,9 @@ def sample() -> pandas.DataFrame:
         columns=['core', 'event'],
         values=['value', 'enabled_ns', 'running_ns'],
     )
-    sample_data_frame = sample_data_frame['value'] * sample_data_frame['enabled_ns'] / sample_data_frame['running_ns']
+    running_ns = sample_data_frame['running_ns']
+    scale = (sample_data_frame['enabled_ns'] / running_ns).where(running_ns != 0, 1.0)
+    sample_data_frame = sample_data_frame['value'] * scale
     sample_data_frame = sample_data_frame.T.groupby(level='event').sum().T.sort_index(axis=1)
     
     #print(sample_data_frame)
@@ -104,9 +141,13 @@ def prediction_callback(
                     context_data_frame,
                     id_column="item_id",
                     timestamp_column="timestamp_s",
-                    target="rx_bytes",
+                    target="tx_bytes",
                     prediction_length=prediction_length,
                 )
+
+                print(context_data_frame)
+
+                print(prediction_data_frame)
 
                 if (context_path):
                     context_data_frame.to_csv(context_path, mode='a', header=False, index=False)
