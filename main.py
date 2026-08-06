@@ -3,6 +3,7 @@ import threading
 import signal
 import time
 import io
+import os
 from collections import deque
 from pathlib import Path
 import argparse
@@ -11,7 +12,7 @@ import pandas
 from chronos import Chronos2Pipeline
 
 EBPF_LOG_DIR     = "/local/ebpf-probe-shepherd-muster/shep_remote_muster/mustherd-logs-muster-10.10.1.1/"
-VEGETA_LOG_DIR   = "/tmp/"
+VEGETA_LOG_PATH  = "/tmp/vegeta.log"
 FORECAST_LOG_DIR = "/tmp/ebpf-probe-chronos-forecasting/"
 
 SUMMARY_COLUMNS = ['core', 'event', 'value', 'enabled_ns', 'running_ns']
@@ -35,23 +36,20 @@ EBPF_EVENT_IDS = {
 def read_and_parse_ebpf_logs() -> pandas.DataFrame:
     pass
 
-def read_and_parse_vegeta_logs() -> pandas.DataFrame:
+def read_and_parse_vegeta_logs(window : pandas.Timedelta = pandas.Timedelta(milliseconds=100)) -> pandas.Series:
     columns : list[str] = ['timestamp_ns', 'status', 'latency_ns']
-    log_files = sorted(
-        glob.glob(f"{VEGETA_LOG_DIR}*vegeta*.log"),
-        key=lambda name: int(re.search(r"vegeta(\d+)\.log$", name).group(1)),
-    )
-    data_frames : list[pandas.DataFrame] = [
-        pandas.read_csv(log_file, usecols=[0, 1, 2], header=None, names=columns)
-        for log_file in log_files
-    ]
-    combined_data_frame : pandas.DataFrame = pandas.concat(data_frames, ignore_index=True)
+
+    if not os.path.exists(VEGETA_LOG_PATH):
+        return pandas.Series(dtype='float64')
+
+    combined_data_frame : pandas.DataFrame = pandas.read_csv(
+        VEGETA_LOG_PATH, usecols=[0, 1, 2], header=None, names=columns)
 
     combined_data_frame['timestamp_ns'] = pandas.to_datetime(combined_data_frame['timestamp_ns'], unit='ns')
     combined_data_frame = combined_data_frame.set_index('timestamp_ns').sort_index()
 
     #return combined_data_frame['latency_ns'].resample('1s').quantile(0.99).expanding().mean() / 1e6
-    return combined_data_frame['latency_ns'].resample('100ms').quantile(0.99) / 1e6
+    return combined_data_frame['latency_ns'].resample(window).quantile(0.99) / 1e6
 
 def sample() -> pandas.DataFrame:
     # ead each iterator file and coalesce into a single sample DataFrame
@@ -110,6 +108,9 @@ def sample_callback(
         diffed_data_frame.insert(0, 'timestamp_s', start_timestamp + pandas.Timedelta(seconds=sample_interval * sample_index))
         diffed_data_frame['item_id'] = 'ebpf'
 
+        p99_latency_ms_series = read_and_parse_vegeta_logs(window=pandas.Timedelta(seconds=sample_interval))
+        diffed_data_frame['p99_latency_ms'] = p99_latency_ms_series.iloc[-1] if len(p99_latency_ms_series) else float('nan')
+
         with mutex_lock:
             combined_data_frame = pandas.concat([context_data_frame, diffed_data_frame]).tail(context_length)
 
@@ -141,7 +142,7 @@ def prediction_callback(
                     context_data_frame,
                     id_column="item_id",
                     timestamp_column="timestamp_s",
-                    target="tx_bytes",
+                    target="p99_latency_ms",
                     prediction_length=prediction_length,
                 )
 
