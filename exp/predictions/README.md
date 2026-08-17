@@ -80,7 +80,7 @@ cmake ..
 make -j
 ```
 
-## Running the experiment
+## Running the Experiment
 
 First, on the worker node run the Axum Webserver and eBPF Probe
 
