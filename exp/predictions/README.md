@@ -1,4 +1,4 @@
-# ebpf-probe-chronos-forecasting/exp/webserver
+# ebpf-probe-chronos-forecasting/exp/predictions
 
 Using Chronos to make latency predictions on eBPF Probe data that has already been gathered.
 
