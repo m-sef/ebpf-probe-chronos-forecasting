@@ -15,6 +15,11 @@ __irqbalance is intentionally disabled on the node running the webserver__
 
 __CPU Governer is set "performance" on all nodes__
 
+| Software | Version |
+| :- | :- |
+| Vegeta | Commit: cf5811269046c672a604b1eb352204d30f16ae4a |
+
+
 ## Vegeta Setup
 
 Setting up Vegeta on the master node:
@@ -97,7 +102,7 @@ sudo ./ebpf_probe -i ${WORKER_IF}
 # Collect log data
 # Adjust ${SAMPLE_INTERVAL} to control granularity of data
 cd /local/ebpf-probe-cpp/scripts/
-sudo .venv/bin/python3 gather_data.py -i ${SAMPLE_INTERVAL}
+sudo .venv/bin/python3 gather_data.py -i ${SAMPLE_INTERVAL} >> /tmp/summary.log
 ```
 
 Then, either manually run Vegeta on the master node, or run `run_experiment.sh`. After you are done running your workload, terminate `gather_data.py` on worker0 and move the data under `results/`

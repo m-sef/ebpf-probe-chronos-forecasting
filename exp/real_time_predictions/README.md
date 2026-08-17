@@ -15,6 +15,10 @@ __irqbalance is intentionally disabled on the node running the webserver__
 
 __CPU Governer is set "performance" on all nodes__
 
+| Software | Version |
+| :- | :- |
+| Vegeta | Commit: cf5811269046c672a604b1eb352204d30f16ae4a |
+
 ## Vegeta Setup
 
 Setting up Vegeta on the master node:
